@@ -1,0 +1,450 @@
+<!--
+概要:
+GitHub Pages に配置する「待機画面 → 時間帯判定 → (任意)稼働チェック → 自動遷移」用の完成版 index.html。
+URLクエリ:
+- url_input   : 遷移先URL（encodeURIComponent済み想定 / 未encodeでも一応対応）
+- health_url  : 稼働チェック用URL（省略可。省略/空ならチェックせず即遷移）
+- page_name   : 表示用ページ名（日本語OK。encodeURIComponent推奨）
+
+仕様:
+- JST 7:00〜22:00 の間:
+    - health_url がある → health_url を Image ping でチェック
+        - OK: url_input に即遷移
+        - NG: 「現在{page_name}が稼働していません」を表示
+    - health_url がない/空 → チェックせず url_input に即遷移
+- JST 7:00〜22:00 以外:
+    - 「現在{page_name}が運用時間外のため、稼働していません。7:00〜22:00に再度ページを開き直してください」を表示
+
+導入しているもの:
+- クエリ解析 (URLSearchParams)
+- 安全なデコード（未encodeでも壊れにくい）
+- JST固定の時間判定
+- CORS不要の稼働チェック(Image ping + timeout)
+- 待機/エラー表示UI
+-->
+
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="cache-control" content="no-store" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>Redirecting...</title>
+
+  <!-- =========================
+       UI / スタイル
+  ========================== -->
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: rgba(255,255,255,.08);
+      --border: rgba(255,255,255,.12);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.65);
+      --accent: #66d9ff;
+      --danger: #ff6b6b;
+      --warn: #ffd166;
+      --ok: #7bed9f;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+      background:
+        radial-gradient(1200px 700px at 20% 10%, rgba(102,217,255,.18), transparent 60%),
+        radial-gradient(1000px 700px at 80% 90%, rgba(255,107,107,.12), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 18px;
+    }
+    .card {
+      width: min(560px, 100%);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 18px 16px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .title {
+      font-size: 18px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 10px;
+      line-height: 1.2;
+    }
+    .badge {
+      font-size: 12px;
+      font-weight: 800;
+      color: rgba(0,0,0,.85);
+      background: var(--accent);
+      padding: 3px 9px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .desc {
+      margin: 0 0 12px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+      white-space: pre-line;
+    }
+    .spinner {
+      width: 44px; height: 44px;
+      border-radius: 999px;
+      border: 4px solid rgba(255,255,255,.18);
+      border-top-color: var(--accent);
+      animation: spin 1s linear infinite;
+      margin: 10px auto 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .status {
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+      min-height: 18px;
+    }
+
+    .message {
+      border-left: 4px solid var(--danger);
+      padding-left: 10px;
+      margin-top: 10px;
+      color: rgba(255,255,255,.9);
+      line-height: 1.6;
+      font-size: 14px;
+      white-space: pre-line;
+    }
+    .message.warn { border-left-color: var(--warn); }
+    .message.ok { border-left-color: var(--ok); }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.10);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn:hover { background: rgba(255,255,255,.14); }
+    .btn.primary {
+      border-color: rgba(102,217,255,.35);
+      background: rgba(102,217,255,.18);
+    }
+    .small {
+      margin-top: 12px;
+      font-size: 12px;
+      color: rgba(255,255,255,.45);
+      line-height: 1.5;
+      word-break: break-all;
+      white-space: pre-line;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+
+<body>
+  <main class="card" role="main" aria-live="polite">
+    <h1 class="title">
+      <span id="pageTitle">接続中…</span>
+      <span class="badge" id="badge">WAIT</span>
+    </h1>
+
+    <p class="desc" id="desc">
+      遷移先を確認しています。
+      しばらくお待ちください…
+    </p>
+
+    <div class="spinner" id="spinner" aria-hidden="true"></div>
+    <div class="status" id="status">確認中</div>
+
+    <div class="message hidden" id="messageBox"></div>
+
+    <div class="actions hidden" id="actions">
+      <button class="btn primary" id="retryBtn" type="button">再試行</button>
+      <a class="btn" id="openTargetLink" href="#" rel="noopener noreferrer">遷移先を開く</a>
+    </div>
+
+    <div class="small" id="debug"></div>
+  </main>
+
+  <!-- =========================
+       設定（ここだけ必要なら編集）
+  ========================== -->
+  <script>
+    // 運用時間（JST 기준）
+    const OPEN_HOUR = 7;   // 7:00 から
+    const CLOSE_HOUR = 22; // 22:00 まで（22:00台はOK / 23:00からNG）
+
+    // 稼働チェック用タイムアウト(ms)
+    const DEFAULT_PING_TIMEOUT_MS = 4500;
+
+    // true にすると画面下部にデバッグ表示を出す
+    const DEBUG = false;
+  </script>
+
+  <!-- =========================
+       ロジック本体
+  ========================== -->
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function safeDecodeURIComponent(maybeEncoded) {
+      // URLSearchParams は基本デコード済みだが、二重encodeや未encode混在に備えて安全に処理する
+      if (maybeEncoded == null) return "";
+      const s = String(maybeEncoded).trim();
+      if (!s) return "";
+      try {
+        // すでにデコードされていても decodeURIComponent は問題になることがあるので、
+        // まず % を含むときだけ decode を試す
+        if (/%[0-9A-Fa-f]{2}/.test(s)) return decodeURIComponent(s);
+        return s;
+      } catch {
+        return s; // 壊れてても落ちない
+      }
+    }
+
+    function getQueryParams() {
+      const u = new URL(location.href);
+      const rawTarget = u.searchParams.get("url_input");
+      const rawHealth = u.searchParams.get("health_url");
+      const rawName = u.searchParams.get("page_name");
+
+      return {
+        targetUrl: safeDecodeURIComponent(rawTarget),
+        healthUrl: safeDecodeURIComponent(rawHealth),
+        pageName: safeDecodeURIComponent(rawName),
+      };
+    }
+
+    function getJstNow() {
+      // 端末TZに依存せず JST (UTC+9) 固定で扱う
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      return new Date(utc + 9 * 60 * 60000);
+    }
+
+    function isInOperatingHoursJst(date) {
+      const h = date.getHours();
+      return h >= OPEN_HOUR && h <= CLOSE_HOUR; // 7〜22
+    }
+
+    function isHttpUrl(url) {
+      try {
+        const u = new URL(url);
+        return u.protocol === "http:" || u.protocol === "https:";
+      } catch {
+        return false;
+      }
+    }
+
+    function setWaiting(pageName) {
+      $("pageTitle").textContent = pageName ? `${pageName}へ移動中…` : "移動中…";
+      $("badge").textContent = "WAIT";
+      $("desc").textContent = "遷移先を確認しています。\nしばらくお待ちください…";
+      $("spinner").classList.remove("hidden");
+      $("status").textContent = "確認中";
+      $("messageBox").classList.add("hidden");
+      $("actions").classList.add("hidden");
+    }
+
+    function setMessage({ badge, badgeColor, title, desc, message, messageClass }) {
+      if (title) $("pageTitle").textContent = title;
+      if (desc) $("desc").textContent = desc;
+
+      $("badge").textContent = badge || "INFO";
+      $("badge").style.background = badgeColor || "";
+
+      $("spinner").classList.add("hidden");
+      $("status").textContent = "";
+
+      $("messageBox").classList.remove("hidden");
+      $("messageBox").className = `message ${messageClass || ""}`.trim();
+      $("messageBox").innerHTML = escapeHtml(message).replace(/\n/g, "<br/>");
+    }
+
+    function setOutOfHours(pageName) {
+      const safeName = pageName ? pageName : "対象ページ";
+      setMessage({
+        badge: "CLOSED",
+        badgeColor: "var(--warn)",
+        title: safeName,
+        desc: "",
+        message:
+          `現在${safeName}が運用時間外のため、稼働していません。\n` +
+          `${OPEN_HOUR}:00〜${CLOSE_HOUR}:00に再度ページを開き直してください`,
+        messageClass: "warn"
+      });
+    }
+
+    function setDown(pageName) {
+      const safeName = pageName ? pageName : "対象ページ";
+      setMessage({
+        badge: "DOWN",
+        badgeColor: "var(--danger)",
+        title: safeName,
+        desc: "",
+        message: `現在${safeName}が稼働していません`,
+        messageClass: ""
+      });
+    }
+
+    function setBadRequest(msg) {
+      setMessage({
+        badge: "ERROR",
+        badgeColor: "var(--danger)",
+        title: "エラー",
+        desc: "",
+        message: msg,
+        messageClass: ""
+      });
+    }
+
+    function showActions(targetUrl, onRetry) {
+      $("actions").classList.remove("hidden");
+      $("openTargetLink").href = targetUrl || "#";
+      $("retryBtn").onclick = onRetry;
+      if (!targetUrl || targetUrl === "#") {
+        $("openTargetLink").classList.add("hidden");
+      } else {
+        $("openTargetLink").classList.remove("hidden");
+      }
+    }
+
+    function redirectTo(url) {
+      $("badge").textContent = "GO";
+      $("badge").style.background = "var(--ok)";
+      $("status").textContent = "遷移します…";
+      // 戻るボタンで戻りにくくするなら replace
+      location.replace(url);
+    }
+
+    /**
+     * Image ping で稼働確認（CORS不要）
+     * - onload: true
+     * - onerror / timeout: false
+     */
+    function pingByImage(url, timeoutMs) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        let settled = false;
+
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(false);
+        }, timeoutMs);
+
+        function cleanup() {
+          clearTimeout(timer);
+          img.onload = null;
+          img.onerror = null;
+        }
+
+        img.onload = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(true);
+        };
+
+        img.onerror = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(false);
+        };
+
+        // キャッシュ回避
+        const bust = (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+        img.src = url + bust;
+      });
+    }
+
+    async function run() {
+      const { targetUrl, healthUrl, pageName } = getQueryParams();
+      setWaiting(pageName);
+
+      const nowJst = getJstNow();
+
+      if (DEBUG) {
+        $("debug").textContent =
+          `JST=${nowJst.toISOString().replace("T", " ").slice(0, 19)}\n` +
+          `targetUrl=${targetUrl || "(none)"}\n` +
+          `healthUrl=${healthUrl || "(none)"}\n` +
+          `pageName=${pageName || "(none)"}`;
+      } else {
+        $("debug").textContent = "";
+      }
+
+      // 必須チェック
+      if (!targetUrl) {
+        setBadRequest("URLパラメータ url_input が指定されていません。\n例: ?url_input=<遷移先URLをencode>&page_name=<名前>&health_url=<任意>");
+        return;
+      }
+      if (!isHttpUrl(targetUrl)) {
+        setBadRequest("url_input は http(s) のURLのみ許可しています。");
+        return;
+      }
+      if (healthUrl && !isHttpUrl(healthUrl)) {
+        setBadRequest("health_url を指定する場合は http(s) のURLのみ許可しています。");
+        return;
+      }
+
+      // 時間帯判定（JST固定）
+      if (!isInOperatingHoursJst(nowJst)) {
+        setOutOfHours(pageName);
+        showActions(targetUrl, () => run());
+        return;
+      }
+
+      // healthUrl が空ならチェックせず即遷移
+      if (!healthUrl) {
+        redirectTo(targetUrl);
+        return;
+      }
+
+      // 稼働チェック
+      $("status").textContent = "稼働状況を確認しています…";
+      const ok = await pingByImage(healthUrl, DEFAULT_PING_TIMEOUT_MS);
+
+      if (ok) {
+        redirectTo(targetUrl);
+      } else {
+        setDown(pageName);
+        showActions(targetUrl, () => run());
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
+
