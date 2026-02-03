@@ -1,26 +1,29 @@
 <!--
 概要:
-GitHub Pages に配置する「待機画面 → 時間帯判定 → (任意)稼働チェック → 自動遷移」用の完成版 index.html。
-URLクエリ:
-- url_input   : 遷移先URL（encodeURIComponent済み想定 / 未encodeでも一応対応）
-- health_url  : 稼働チェック用URL（省略可。省略/空ならチェックせず即遷移）
-- page_name   : 表示用ページ名（日本語OK。encodeURIComponent推奨）
+GitHub Pages に配置する「待機画面 → 時間帯判定 → 許可リスト検証 → (任意)稼働チェック → 自動遷移」ページの完成版。
 
-仕様:
-- JST 7:00〜22:00 の間:
-    - health_url がある → health_url を Image ping でチェック
-        - OK: url_input に即遷移
-        - NG: 「現在{page_name}が稼働していません」を表示
-    - health_url がない/空 → チェックせず url_input に即遷移
-- JST 7:00〜22:00 以外:
-    - 「現在{page_name}が運用時間外のため、稼働していません。7:00〜22:00に再度ページを開き直してください」を表示
+要件実装:
+- url_input が "setting" の場合は準備中メッセージ表示
+- url_input は悪用対策として、以下のみ許可:
+    1) LIFF: https://liff.line.me/{liff_id}...（liff_id は許可リスト配列）
+    2) GAS : https://script.google.com/macros/s/{gas_id}...（gas_id は許可リスト配列）
+- LIFF は許可されたIDならそのまま遷移
+- GAS は許可されたIDなら「POSTでアクセス → 返ってきたURLへ遷移」
+    ※ GASから返るURLはドメイン制限しない（要件どおり）
+- health_url は任意:
+    - 未指定/空なら稼働チェックしない
+    - 指定がある場合だけ Image ping で稼働チェック（CORS不要）
+      ※ 稼働チェック対象は「遷移前のURL（LIFF or GAS）」に対して行う
+- JST 7:00〜22:00 の間だけ遷移処理を行い、それ以外は運用時間外メッセージ
+- url_input / health_url / page_name は encodeURIComponent 済み推奨（未encodeでも壊れにくく処理）
 
 導入しているもの:
 - クエリ解析 (URLSearchParams)
-- 安全なデコード（未encodeでも壊れにくい）
+- 安全なデコード
 - JST固定の時間判定
 - CORS不要の稼働チェック(Image ping + timeout)
-- 待機/エラー表示UI
+- GAS POST(fetch) → 返却URLへ遷移
+- 許可IDリストによる悪用抑止
 -->
 
 <!doctype html>
@@ -61,7 +64,7 @@ URLクエリ:
       padding: 18px;
     }
     .card {
-      width: min(560px, 100%);
+      width: min(600px, 100%);
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 18px;
@@ -170,10 +173,7 @@ URLクエリ:
       <span class="badge" id="badge">WAIT</span>
     </h1>
 
-    <p class="desc" id="desc">
-      遷移先を確認しています。
-      しばらくお待ちください…
-    </p>
+    <p class="desc" id="desc">遷移先を確認しています。\nしばらくお待ちください…</p>
 
     <div class="spinner" id="spinner" aria-hidden="true"></div>
     <div class="status" id="status">確認中</div>
@@ -189,7 +189,7 @@ URLクエリ:
   </main>
 
   <!-- =========================
-       設定（ここだけ必要なら編集）
+       設定（運用で編集しやすい場所）
   ========================== -->
   <script>
     // 運用時間（JST 기준）
@@ -198,6 +198,23 @@ URLクエリ:
 
     // 稼働チェック用タイムアウト(ms)
     const DEFAULT_PING_TIMEOUT_MS = 4500;
+
+    // GAS POSTのタイムアウト(ms)
+    const DEFAULT_GAS_POST_TIMEOUT_MS = 6500;
+
+    // ▼ 許可する GAS の ID リスト（ここを編集するだけで運用変更できる）
+    // 例: https://script.google.com/macros/s/{gas_id}/exec
+    const GAS_ID_ALLOWLIST = [
+      "AKfycbzeVQwcz7O2DbYq",
+      "YOUR_GAS_ID_2",
+    ];
+
+    // ▼ 許可する LIFF の ID リスト（ここを編集するだけで運用変更できる）
+    // 例: https://liff.line.me/{liff_id}
+    const LIFF_ID_ALLOWLIST = [
+      "200902807",
+      "YOUR_LIFF_ID_2",
+    ];
 
     // true にすると画面下部にデバッグ表示を出す
     const DEBUG = false;
@@ -209,18 +226,6 @@ URLクエリ:
   <script>
     const $ = (id) => document.getElementById(id);
 
-    function setPreparing(pageName) {
-      const safeName = pageName ? pageName : "対象";
-      setMessage({
-        badge: "PREPARING",
-        badgeColor: "var(--warn)",
-        title: safeName,
-        desc: "",
-        message: `現在「${safeName}」のページは準備中です。\n実装までお待ちください。`,
-        messageClass: "warn"
-      });
-    }
-
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -228,35 +233,27 @@ URLクエリ:
     }
 
     function safeDecodeURIComponent(maybeEncoded) {
-      // URLSearchParams は基本デコード済みだが、二重encodeや未encode混在に備えて安全に処理する
       if (maybeEncoded == null) return "";
       const s = String(maybeEncoded).trim();
       if (!s) return "";
       try {
-        // すでにデコードされていても decodeURIComponent は問題になることがあるので、
-        // まず % を含むときだけ decode を試す
         if (/%[0-9A-Fa-f]{2}/.test(s)) return decodeURIComponent(s);
         return s;
       } catch {
-        return s; // 壊れてても落ちない
+        return s;
       }
     }
 
     function getQueryParams() {
       const u = new URL(location.href);
-      const rawTarget = u.searchParams.get("url_input");
-      const rawHealth = u.searchParams.get("health_url");
-      const rawName = u.searchParams.get("page_name");
-
       return {
-        targetUrl: safeDecodeURIComponent(rawTarget),
-        healthUrl: safeDecodeURIComponent(rawHealth),
-        pageName: safeDecodeURIComponent(rawName),
+        urlInput: safeDecodeURIComponent(u.searchParams.get("url_input")),
+        healthUrl: safeDecodeURIComponent(u.searchParams.get("health_url")),
+        pageName: safeDecodeURIComponent(u.searchParams.get("page_name")),
       };
     }
 
     function getJstNow() {
-      // 端末TZに依存せず JST (UTC+9) 固定で扱う
       const now = new Date();
       const utc = now.getTime() + now.getTimezoneOffset() * 60000;
       return new Date(utc + 9 * 60 * 60000);
@@ -279,6 +276,7 @@ URLクエリ:
     function setWaiting(pageName) {
       $("pageTitle").textContent = pageName ? `${pageName}へ移動中…` : "移動中…";
       $("badge").textContent = "WAIT";
+      $("badge").style.background = "var(--accent)";
       $("desc").textContent = "遷移先を確認しています。\nしばらくお待ちください…";
       $("spinner").classList.remove("hidden");
       $("status").textContent = "確認中";
@@ -288,10 +286,10 @@ URLクエリ:
 
     function setMessage({ badge, badgeColor, title, desc, message, messageClass }) {
       if (title) $("pageTitle").textContent = title;
-      if (desc) $("desc").textContent = desc;
+      if (desc != null) $("desc").textContent = desc;
 
       $("badge").textContent = badge || "INFO";
-      $("badge").style.background = badgeColor || "";
+      $("badge").style.background = badgeColor || "var(--accent)";
 
       $("spinner").classList.add("hidden");
       $("status").textContent = "";
@@ -301,29 +299,54 @@ URLクエリ:
       $("messageBox").innerHTML = escapeHtml(message).replace(/\n/g, "<br/>");
     }
 
+    function showActions(targetUrl, onRetry) {
+      $("actions").classList.remove("hidden");
+      $("retryBtn").onclick = onRetry;
+
+      if (targetUrl && isHttpUrl(targetUrl)) {
+        $("openTargetLink").href = targetUrl;
+        $("openTargetLink").classList.remove("hidden");
+      } else {
+        $("openTargetLink").href = "#";
+        $("openTargetLink").classList.add("hidden");
+      }
+    }
+
     function setOutOfHours(pageName) {
-      const safeName = pageName ? pageName : "対象ページ";
+      const name = pageName || "対象ページ";
       setMessage({
         badge: "CLOSED",
         badgeColor: "var(--warn)",
-        title: safeName,
+        title: name,
         desc: "",
         message:
-          `現在${safeName}が運用時間外のため、稼働していません。\n` +
+          `現在${name}が運用時間外のため、稼働していません。\n` +
           `${OPEN_HOUR}:00〜${CLOSE_HOUR}:00に再度ページを開き直してください`,
         messageClass: "warn"
       });
     }
 
     function setDown(pageName) {
-      const safeName = pageName ? pageName : "対象ページ";
+      const name = pageName || "対象ページ";
       setMessage({
         badge: "DOWN",
         badgeColor: "var(--danger)",
-        title: safeName,
+        title: name,
         desc: "",
-        message: `現在${safeName}が稼働していません`,
+        message: `現在${name}が稼働していません`,
         messageClass: ""
+      });
+    }
+
+    function setPreparing(pageName) {
+      const name = pageName || "対象";
+      setMessage({
+        badge: "PREPARING",
+        badgeColor: "var(--warn)",
+        title: name,
+        desc: "",
+        message: `現在「${name}」のページは準備中です。\n実装までお待ちください。`,
+        messageClass: "warn"
       });
     }
 
@@ -338,29 +361,15 @@ URLクエリ:
       });
     }
 
-    function showActions(targetUrl, onRetry) {
-      $("actions").classList.remove("hidden");
-      $("openTargetLink").href = targetUrl || "#";
-      $("retryBtn").onclick = onRetry;
-      if (!targetUrl || targetUrl === "#") {
-        $("openTargetLink").classList.add("hidden");
-      } else {
-        $("openTargetLink").classList.remove("hidden");
-      }
-    }
-
     function redirectTo(url) {
       $("badge").textContent = "GO";
       $("badge").style.background = "var(--ok)";
       $("status").textContent = "遷移します…";
-      // 戻るボタンで戻りにくくするなら replace
       location.replace(url);
     }
 
     /**
-     * Image ping で稼働確認（CORS不要）
-     * - onload: true
-     * - onerror / timeout: false
+     * Image ping（CORS不要）
      */
     function pingByImage(url, timeoutMs) {
       return new Promise((resolve) => {
@@ -386,7 +395,6 @@ URLクエリ:
           cleanup();
           resolve(true);
         };
-
         img.onerror = () => {
           if (settled) return;
           settled = true;
@@ -394,74 +402,200 @@ URLクエリ:
           resolve(false);
         };
 
-        // キャッシュ回避
         const bust = (url.includes("?") ? "&" : "?") + "t=" + Date.now();
         img.src = url + bust;
       });
     }
 
+    /**
+     * GASへPOSTして、返ってきたURL（文字列 or JSON）を取り出す
+     * - content-type を text/plain にしてプリフライトを避けやすくする（環境によりCORSが必要）
+     * - GAS側は doPost で URL を返す（例: JSON { "redirectUrl": "..." } か、プレーンテキストURL）
+     */
+    async function postToGasAndGetRedirectUrl(gasUrl, payload, timeoutMs) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(gasUrl, {
+          method: "POST",
+          mode: "cors",
+          cache: "no-store",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify(payload ?? {})
+        });
+
+        // CORSやGAS設定によりここで例外/失敗になることがある
+        if (!res.ok) throw new Error("GAS HTTP status not ok");
+
+        const text = await res.text();
+
+        // 1) JSON形式を試す
+        try {
+          const obj = JSON.parse(text);
+          const u = obj.redirectUrl || obj.url || obj.targetUrl || "";
+          return String(u || "").trim();
+        } catch {
+          // 2) プレーンテキストURLとして扱う
+          return String(text || "").trim();
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+
+// =========================
+// 許可判定ロジック（部分ID=prefix対応版）
+// =========================
+
+function matchesAnyPrefix(value, prefixList) {
+  if (!value) return false;
+  return prefixList.some((p) => {
+    const prefix = String(p || "").trim();
+    if (!prefix) return false;
+    return value.startsWith(prefix);
+  });
+}
+
+function isAllowedLiffUrl(targetUrl) {
+  // 許可: https://liff.line.me/{liff_id}... で、{liff_id} が許可prefixに一致
+  if (!isHttpUrl(targetUrl)) return false;
+
+  const prefix = "https://liff.line.me/";
+  if (!targetUrl.startsWith(prefix)) return false;
+
+  const rest = targetUrl.slice(prefix.length);
+  const id = rest.split(/[\/?#]/)[0] || ""; // {liff_id} を取り出す
+
+  // 完全一致ではなく prefix一致
+  return matchesAnyPrefix(id, LIFF_ID_ALLOWLIST);
+}
+
+function isAllowedGasUrl(targetUrl) {
+  // 許可: https://script.google.com/macros/s/{gas_id}... で、{gas_id} が許可prefixに一致
+  if (!isHttpUrl(targetUrl)) return false;
+
+  const base = "https://script.google.com/macros/s/";
+  if (!targetUrl.startsWith(base)) return false;
+
+  const rest = targetUrl.slice(base.length);
+  const id = rest.split(/[\/?#]/)[0] || ""; // {gas_id} を取り出す
+
+  // 完全一致ではなく prefix一致
+  return matchesAnyPrefix(id, GAS_ID_ALLOWLIST);
+}
+
+
+    // =========================
+    // メイン
+    // =========================
+
     async function run() {
-      const { targetUrl, healthUrl, pageName } = getQueryParams();
+      const { urlInput, healthUrl, pageName } = getQueryParams();
       setWaiting(pageName);
 
-      // ===============================
-      // 特例: setting は準備中表示
-      // ===============================
-      if (targetUrl === "setting") {
-        setPreparing(pageName);
-        return;
-      }
-
-
       const nowJst = getJstNow();
-
       if (DEBUG) {
         $("debug").textContent =
           `JST=${nowJst.toISOString().replace("T", " ").slice(0, 19)}\n` +
-          `targetUrl=${targetUrl || "(none)"}\n` +
-          `healthUrl=${healthUrl || "(none)"}\n` +
-          `pageName=${pageName || "(none)"}`;
+          `url_input=${urlInput || "(none)"}\n` +
+          `health_url=${healthUrl || "(none)"}\n` +
+          `page_name=${pageName || "(none)"}\n` +
+          `allowedGAS=${GAS_ID_ALLOWLIST.length}, allowedLIFF=${LIFF_ID_ALLOWLIST.length}`;
       } else {
         $("debug").textContent = "";
       }
 
-      // 必須チェック
-      if (!targetUrl) {
-        setBadRequest("URLパラメータ url_input が指定されていません。\n例: ?url_input=<遷移先URLをencode>&page_name=<名前>&health_url=<任意>");
-        return;
-      }
-      if (!isHttpUrl(targetUrl)) {
-        setBadRequest("url_input は http(s) のURLのみ許可しています。");
-        return;
-      }
-      if (healthUrl && !isHttpUrl(healthUrl)) {
-        setBadRequest("health_url を指定する場合は http(s) のURLのみ許可しています。");
+      // 特例: setting
+      if (urlInput === "setting") {
+        setPreparing(pageName);
         return;
       }
 
-      // 時間帯判定（JST固定）
+      // 時間外
       if (!isInOperatingHoursJst(nowJst)) {
         setOutOfHours(pageName);
-        showActions(targetUrl, () => run());
+        showActions("", () => run());
         return;
       }
 
-      // healthUrl が空ならチェックせず即遷移
-      if (!healthUrl) {
-        redirectTo(targetUrl);
+      // url_input 必須
+      if (!urlInput) {
+        setBadRequest("URLパラメータ url_input が指定されていません。");
         return;
       }
 
-      // 稼働チェック
-      $("status").textContent = "稼働状況を確認しています…";
-      const ok = await pingByImage(healthUrl, DEFAULT_PING_TIMEOUT_MS);
-
-      if (ok) {
-        redirectTo(targetUrl);
-      } else {
-        setDown(pageName);
-        showActions(targetUrl, () => run());
+      // health_url がある場合のみ稼働チェック（ただしチェック対象は「遷移前のURL」）
+      // 例: LIFFに飛ぶ前にLIFFのfaviconをチェック、GASならGASの /exec をチェックなど
+      if (healthUrl) {
+        if (!isHttpUrl(healthUrl)) {
+          setBadRequest("health_url を指定する場合は http(s) のURLのみ許可しています。");
+          return;
+        }
+        $("status").textContent = "稼働状況を確認しています…";
+        const ok = await pingByImage(healthUrl, DEFAULT_PING_TIMEOUT_MS);
+        if (!ok) {
+          setDown(pageName);
+          showActions("", () => run());
+          return;
+        }
       }
+
+      // 1) LIFF許可ならそのまま遷移
+      if (isAllowedLiffUrl(urlInput)) {
+        redirectTo(urlInput);
+        return;
+      }
+
+      // 2) GAS許可なら POST → 返却URLへ遷移（返却URLはドメイン制限しない）
+      if (isAllowedGasUrl(urlInput)) {
+        $("status").textContent = "GASへ問い合わせています…";
+
+        try {
+          // GASへ渡す payload（必要ならここに追加）
+          const payload = {
+            page_name: pageName || "",
+            // 必要なら、クエリごと渡す等も可能
+            // from: location.href
+          };
+
+          const redirectUrl = await postToGasAndGetRedirectUrl(
+            urlInput,
+            payload,
+            DEFAULT_GAS_POST_TIMEOUT_MS
+          );
+
+          if (!redirectUrl) {
+            setDown(pageName);
+            showActions("", () => run());
+            return;
+          }
+
+          // 返却URLはドメイン制限しないが、最低限 http(s) だけ許可（危険スキーム対策）
+          if (!isHttpUrl(redirectUrl)) {
+            setBadRequest("GASから返却されたURLが http(s) ではありません。");
+            return;
+          }
+
+          redirectTo(redirectUrl);
+          return;
+        } catch (e) {
+          // CORS / タイムアウト / GASダウンなど
+          setDown(pageName);
+          showActions("", () => run());
+          return;
+        }
+      }
+
+      // それ以外は拒否
+      setBadRequest(
+        "許可されていない遷移先です。\n" +
+        "このページは LIFF / GAS の許可IDのみ遷移できます。"
+      );
     }
 
     run();
