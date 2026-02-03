@@ -209,6 +209,18 @@ URLクエリ:
   <script>
     const $ = (id) => document.getElementById(id);
 
+    function setPreparing(pageName) {
+      const safeName = pageName ? pageName : "対象";
+      setMessage({
+        badge: "PREPARING",
+        badgeColor: "var(--warn)",
+        title: safeName,
+        desc: "",
+        message: `現在「${safeName}」のページは準備中です。\n実装までお待ちください。`,
+        messageClass: "warn"
+      });
+    }
+
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -391,6 +403,15 @@ URLクエリ:
     async function run() {
       const { targetUrl, healthUrl, pageName } = getQueryParams();
       setWaiting(pageName);
+
+      // ===============================
+      // 特例: setting は準備中表示
+      // ===============================
+      if (targetUrl === "setting") {
+        setPreparing(pageName);
+        return;
+      }
+
 
       const nowJst = getJstNow();
 
