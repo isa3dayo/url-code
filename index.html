@@ -374,8 +374,9 @@ GitHub Pages に配置する「待機画面 → 時間帯判定 → 許可リス
       $("status").textContent = "遷移します…";
 
       // 1) 先に遷移（履歴を残しにくい）
-      location.replace(url);
-      try { window.close(); } catch {}
+      //location.replace(url);
+      location.assign(url);
+
 
       // 2) “閉じる”を試す（効く環境だけ閉じる）
       // ※ setTimeoutしないと replace が走らないことがある
