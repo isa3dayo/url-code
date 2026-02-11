@@ -192,11 +192,12 @@ GitHub Pages に配置する「待機画面 → 時間帯判定 → 許可リス
        設定（運用で編集しやすい場所）
   ========================== -->
   <script>
+    // true にすると運用時間チェックを無視（テスト用）
+    const TEST_BYPASS_ENABLED = true;
+
     // 運用時間（JST 기준）
-    //const OPEN_HOUR = 7;   // 7:00 から
-    //const CLOSE_HOUR = 22; // 22:00 まで（22:00台はOK / 23:00からNG）
-    const OPEN_HOUR = 0;   // 7:00 から
-    const CLOSE_HOUR = 23; // 22:00 まで（22:00台はOK / 23:00からNG）
+    const OPEN_HOUR = 7;   // 7:00 から
+    const CLOSE_HOUR = 22; // 22:00 まで（22:00台はOK / 23:00からNG）
 
     // 稼働チェック用タイムアウト(ms)
     const DEFAULT_PING_TIMEOUT_MS = 4500;
@@ -519,7 +520,8 @@ function isAllowedGasUrl(targetUrl) {
       }
 
       // 時間外
-      if (!isInOperatingHoursJst(nowJst)) {
+      // 運用時間チェック（テストバイパス対応）
+      if (!TEST_BYPASS_ENABLED && !isInOperatingHoursJst(nowJst)) {
         setOutOfHours(pageName);
         showActions("", () => run());
         return;
