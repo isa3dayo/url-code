@@ -230,11 +230,11 @@ GitHub Pages に配置する「待機画面 → 時間帯判定 → 許可リス
       "YOUR_LIFF_ID_2",
     ];
 
-    // ▼ liff.init() に使う完全なLIFF ID
-    // 重要: "200902807" のような先頭だけではなく、LINE Developersに表示される完全なIDを入れる
-    // 例: "200902807-xxxxxxxx"
-    // URLに ?liff_id=200902807-xxxxxxxx を付けた場合は、その値を優先する
-    const DEFAULT_LIFF_ID = "200902807-xxxxxxxx";
+    // ▼ liff.init() に使う完全なLIFF IDの予備値
+    // 基本運用: URLに ?liff_id=200902807-xxxxxxxx を付けて渡す
+    // 注意: "200902807" のような先頭だけではなく、LINE Developersに表示される完全なIDが必要
+    // URL変数で必ず渡す運用なら空文字のままでOK
+    const DEFAULT_LIFF_ID = "";
 
     // true の場合、GAS問い合わせ前にLINE userId取得を必須にする
     // 4人を確実に判別して保存する用途では true 推奨
@@ -645,9 +645,9 @@ function isAllowedGasUrl(targetUrl) {
 
           if (!resolvedLiffId) {
             setLineAuthError(
-              "liff.init() に使う完全なLIFF IDが設定されていません。\n" +
-              "DEFAULT_LIFF_ID に LINE Developers の完全なLIFF ID（例: 200902807-xxxxxxxx）を設定してください。\n" +
-              "またはURLに liff_id=完全なLIFF ID を付けてください。"
+              "liff.init() に使う完全なLIFF IDがURLに指定されていません。\n" +
+              "LIFFエンドポイントURLに liff_id=完全なLIFF ID を付けてください。\n" +
+              "例: ?liff_id=200902807-xxxxxxxx&url_input=..."
             );
             return;
           }
