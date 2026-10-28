@@ -1,0 +1,31 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>競馬アシスト</title></head><body><p id="message">LINEの認証を確認しています…</p>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+// Source-pinned config only. URL/query parameters can never choose an authentication destination.
+const C_PAGES_CONFIG = Object.freeze({"mode": "production", "gasEndpoint": "https://script.google.com/macros/s/AKfycby6poQGt1onn3cbljAvum4F65k1Rll1jy1Xq9q5C97gIS2x83fke-YbKYwswxIIm74/exec", "liffId": "2009028076-x7E0oQMi", "verifiedDeployment": true, "verifiedUrlAuthority": true, "tokenType": "access"});
+(async()=>{
+ const message=document.getElementById('message');const fragment=new URLSearchParams(location.hash.slice(1));history.replaceState(null,'',location.pathname+location.search);const state=fragment.get('c_state');
+ try{
+  const c=C_PAGES_CONFIG;if(!c)throw Error('not_configured');const gas=new URL(c.gasEndpoint);
+  const synth=c.mode==='synthetic'&&location.protocol==='http:'&&['localhost','127.0.0.1'].includes(location.hostname)&&gas.protocol==='http:'&&['localhost','127.0.0.1'].includes(gas.hostname);
+  if(!synth&&(c.mode!=='production'||c.verifiedDeployment!==true||c.verifiedUrlAuthority!==true))throw Error('scope_unverified');
+  if(!synth&&!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(c.gasEndpoint))throw Error('wrong_gas');
+  // LIFF first: a return from liff.login carries its code in the query and must be consumed by init before any hop.
+  // Not logged in (external browser): log in back to this exact page without fragment, then restart cleanly.
+  await liff.init({liffId:c.liffId});if(!liff.isLoggedIn()){liff.login({redirectUri:location.origin+location.pathname});return;}
+  const nonce=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('');
+  const response=await fetch(c.gasEndpoint,{method:'POST',mode:'cors',credentials:'omit',cache:'no-store',redirect:'follow',signal:AbortSignal.timeout(10000),headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'c_route',nonce})});
+  const last=new URL(response.url);if(!response.ok||!synth&&(last.protocol!=='https:'||!['script.google.com','script.googleusercontent.com'].includes(last.hostname)))throw Error('gas_failed');const text=await response.text();if(text.length>8192)throw Error('gas_failed');const route=JSON.parse(text);
+  if(route.ok!==true||route.nonce!==nonce||!Number.isSafeInteger(route.issuedAt)||Math.abs(Date.now()/1000-route.issuedAt)>60)throw Error('stale_route');
+  // Closed sentinel: the operator parks the C route here when no C Web is running. Never redirect; no token use.
+  if(route.origin==='https://c-route-closed.trycloudflare.com'){message.textContent='現在、LINEログイン版は停止中です。';return;}
+  const u=new URL(route.origin);if(u.origin!==route.origin||u.username||u.password||!synth&&!/^https:\/\/[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com$/.test(route.origin)||synth&&!(u.protocol==='http:'&&['localhost','127.0.0.1'].includes(u.hostname)))throw Error('wrong_origin');
+  if(!state){location.replace(route.origin+'/auth/start');return;}
+  if(state.length>4096||!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(state))throw Error('state_invalid');const p=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(state.split('.')[0].replace(/-/g,'+').replace(/_/g,'/')),x=>x.charCodeAt(0))));
+  if(p.origin!==route.origin||p.generation!==route.generation||!Number.isSafeInteger(p.exp)||p.exp<=Date.now()/1000)throw Error('state_route_changed');
+  // tokenType 'access': existing LIFF with profile scope (Web verifies via LINE verify+profile APIs). Default: ID token (openid).
+  const access=c.tokenType==='access';const idToken=access?liff.getAccessToken():liff.getIDToken();if(typeof idToken!=='string'||idToken.length>4096||!(access?/^[A-Za-z0-9._~+\/=-]{20,2048}$/:/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/).test(idToken))throw Error('line_unavailable');
+  location.replace(route.origin+'/auth/complete#'+new URLSearchParams({state,id_token:idToken}).toString());
+ }catch{message.textContent='認証を確認できませんでした。LINEから開き直してください。';}
+})();
+</script></body></html>
